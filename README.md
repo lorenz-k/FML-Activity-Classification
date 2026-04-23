@@ -4,7 +4,7 @@ Topic B
 
 ## Project Organization
 **Communication:** Discord, WhatsApp
-**Task Management:** GitHub Projects
+**Task Management:** GitHub Projects --> agile Approach
 
 ## Meetings
 Weekly meetings on Friday to catch up with the team
