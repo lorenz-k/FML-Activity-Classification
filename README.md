@@ -3,7 +3,7 @@ Federated Machine Learning application for Human Activity Recognition (UCI HAR).
 Topic B
 
 ## Project Organization
-**Communication:** Discord
+**Communication:** Discord, WhatsApp
 **Task Management:** GitHub Projects
 
 ## Meetings
