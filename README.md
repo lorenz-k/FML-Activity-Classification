@@ -2,17 +2,17 @@
 Federated Machine Learning application for Human Activity Recognition (UCI HAR). Developed as part of the FML Programmierpraktikum at TU Berlin (SBE Group).
 Topic B
 
-##Project Organization
+## Project Organization
 **Communication:** Discord
 **Task Management:** GitHub Projects
 
-##Meetings
+## Meetings
 Weekly meetings on Friday to catch up with the team
 --> documentation with md
 
 
 
-#Team Roles
+# Team Roles
 **Data Engineering & Partitioning:**
 --> Python pipeline to load and preprocess the dataset
 
