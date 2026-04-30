@@ -6,7 +6,8 @@ Outputs (./outputs/har/):
   client_0.npz … client_3.npz  
 
 Pipeline:
-  1. Partition →  random IID split into N equal-ish client shards
+  1. merge data into one set
+  2. Partition random IID split into N equal-ish client shards
 
 Usage:
   python prepare_har.py                       # 4 clients
