@@ -26,12 +26,10 @@ Weekly meetings on Friday to catch up with the team
 --> Python pipeline to load and preprocess the dataset
 
 **ML Architecture:**
---> PyTorch neural network for activity classification
+--> PyTorch neural network for activity classification (See second PowerPoint for that)
 
 **FL Communication:**
 --> Developing model serialization and preparing interfaces for FL
 
 **Infrastructure & Dashboard:**
 --> designing the infrastucture around the project
-
-
