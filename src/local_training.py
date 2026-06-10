@@ -233,7 +233,7 @@ def main():
     torch.save(model.state_dict(), model_path)
 
     print()
-     print(f"Best epoch by test accuracy: {best_epoch}")
+    print(f"Best epoch by test accuracy: {best_epoch}")
     print(f"Final test loss: {test_loss:.4f}")
     print(f"Final test accuracy: {test_acc:.4f}")
     print(f"Final test macro F1: {macro_f1:.4f}")
