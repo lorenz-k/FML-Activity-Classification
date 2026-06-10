@@ -28,7 +28,7 @@ outputs/har/client_3.npz
 outputs/har/test_global.npz
 ```
 
-The client files are IID partitions of the official UCI HAR training split. The
+The client files are IID partitions of the official UCI HAR training split. Note that this is IID with respect to the different label classes, not with respect to the different subjects/people from the study in which the data was collected. The
 official UCI HAR test split is kept separate as `test_global.npz`.
 
 ## Local Model Training
