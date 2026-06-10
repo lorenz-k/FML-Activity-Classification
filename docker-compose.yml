@@ -1,0 +1,107 @@
+services:
+  flower-server:
+    build: .
+    image: fml-flower:local
+    command:
+      - python
+      - -m
+      - src.flower_server
+      - --server-address
+      - 0.0.0.0:8080
+    environment:
+      RUN_ID: ${RUN_ID:-docker_local}
+      ROUNDS: ${ROUNDS:-5}
+      NUM_CLIENTS: ${NUM_CLIENTS:-4}
+      LOCAL_EPOCHS: ${LOCAL_EPOCHS:-1}
+      BATCH_SIZE: ${BATCH_SIZE:-64}
+      LR: ${LR:-0.001}
+      HIDDEN_DIM: ${HIDDEN_DIM:-128}
+      DROPOUT: ${DROPOUT:-0.2}
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./outputs:/app/outputs
+
+  flower-client-0:
+    build: .
+    image: fml-flower:local
+    restart: on-failure
+    command:
+      - python
+      - -m
+      - src.flower_client
+    environment:
+      CLIENT_ID: 0
+      SERVER_ADDRESS: flower-server:8080
+      LOCAL_EPOCHS: ${LOCAL_EPOCHS:-1}
+      BATCH_SIZE: ${BATCH_SIZE:-64}
+      LR: ${LR:-0.001}
+      HIDDEN_DIM: ${HIDDEN_DIM:-128}
+      DROPOUT: ${DROPOUT:-0.2}
+    depends_on:
+      - flower-server
+    volumes:
+      - ./outputs:/app/outputs
+
+  flower-client-1:
+    build: .
+    image: fml-flower:local
+    restart: on-failure
+    command:
+      - python
+      - -m
+      - src.flower_client
+    environment:
+      CLIENT_ID: 1
+      SERVER_ADDRESS: flower-server:8080
+      LOCAL_EPOCHS: ${LOCAL_EPOCHS:-1}
+      BATCH_SIZE: ${BATCH_SIZE:-64}
+      LR: ${LR:-0.001}
+      HIDDEN_DIM: ${HIDDEN_DIM:-128}
+      DROPOUT: ${DROPOUT:-0.2}
+    depends_on:
+      - flower-server
+    volumes:
+      - ./outputs:/app/outputs
+
+  flower-client-2:
+    build: .
+    image: fml-flower:local
+    restart: on-failure
+    command:
+      - python
+      - -m
+      - src.flower_client
+    environment:
+      CLIENT_ID: 2
+      SERVER_ADDRESS: flower-server:8080
+      LOCAL_EPOCHS: ${LOCAL_EPOCHS:-1}
+      BATCH_SIZE: ${BATCH_SIZE:-64}
+      LR: ${LR:-0.001}
+      HIDDEN_DIM: ${HIDDEN_DIM:-128}
+      DROPOUT: ${DROPOUT:-0.2}
+    depends_on:
+      - flower-server
+    volumes:
+      - ./outputs:/app/outputs
+
+  flower-client-3:
+    build: .
+    image: fml-flower:local
+    restart: on-failure
+    command:
+      - python
+      - -m
+      - src.flower_client
+    environment:
+      CLIENT_ID: 3
+      SERVER_ADDRESS: flower-server:8080
+      LOCAL_EPOCHS: ${LOCAL_EPOCHS:-1}
+      BATCH_SIZE: ${BATCH_SIZE:-64}
+      LR: ${LR:-0.001}
+      HIDDEN_DIM: ${HIDDEN_DIM:-128}
+      DROPOUT: ${DROPOUT:-0.2}
+    depends_on:
+      - flower-server
+    volumes:
+      - ./outputs:/app/outputs
