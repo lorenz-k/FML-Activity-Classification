@@ -6,6 +6,10 @@ __pycache__/
 # C extensions
 *.so
 
+# Ignore all generated data, trained models, and local experiment runs
+# we dont want the different models that everyone has trained locally, to flood the repo for everyone
+outputs/
+
 # We dont want these files from macos finder which store folder displaying preferences:
 .DS_Store
 **/ .DS_Store
