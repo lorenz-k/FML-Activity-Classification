@@ -23,62 +23,39 @@ def get_device():
     # - cuda: NVIDIA GPU
     # - cpu: normaler Prozessor als universeller Fallback
     #
-    # Wir nehmen automatisch das beste verfuegbare Device.
-    # if torch.backends.mps.is_available():
-    #     return torch.device("mps")
-    # if torch.cuda.is_available():
-    #     return torch.device("cuda")
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
+    if torch.cuda.is_available():
+        return torch.device("cuda")
     return torch.device("cpu")
 
 
 def train_one_epoch(model, loader, criterion, optimizer, device):
-    # Eine wir hierbei bedeuten ->  Das Modell sieht einmal alle Trainingssamples.
-    #
-    #  model.train() aktiviert den Trainingsmodus. Das ist wichtig fuer Layer wie
-    # Dropout:  Dropout soll im Training aktiv sein, aber nicht bei Evaluation.
     model.train()
 
-    #  Wir sammeln Loss und Accuracy ueber alle Batches,  um am Ende einen
-    #   durchschnittlichen Epochenwert auszugeben.
     total_loss = 0.0
     correct = 0
     total = 0
 
-    # Der DataLoader liefert pro Iteration einen Batch: X sind Features,
-    # y sind die korrekten Labels.
     for X, y in loader:
-        # Daten und Labels muessen auf demselben Device liegen wie das Modell.
         X = X.to(device)
         y = y.to(device)
 
-        #  PyTorch sammelt Gradienten standardmaessig auf. Deshalb setzen wir sie
-        # vor jedem Batch zurueck.
         optimizer.zero_grad()
 
-        # Forward Pass: Das Modell berechnet fuer jedes Sample 6 Logits.
         logits = model(X)
 
-        #    Loss: CrossEntropyLoss vergleicht die Logits mit den echten Labels und
-        # gibt  eine Zahl zurueck, die ausdrueckt, wie falsch das Modell liegt.
         loss = criterion(logits, y)
 
-        # Backpropagation: PyTorch berechnet automatisch die Gradienten aller
-        # lernbaren Parameter bezogen auf den Loss.
         loss.backward()
 
-        # Optimizer-Schritt: Adam-Optimizer nutzt die Gradienten, um die Modellgewichte zu
-        # aktualisieren::
         optimizer.step()
 
-        #   loss.item() ist der Loss fuer den aktuellen Batch. Wir multiplizieren
-        # mit len(y), damit grosse und kleine Batches korrekt gewichtet werden.
         total_loss += loss.item() * len(y)
 
-        #  Die vorhergesagte Klasse ist der Index des groessten Logits.
         correct += (logits.argmax(dim=1) == y).sum().item()
         total += len(y)
 
-    #  Rueckgabe: durchschnittlicher Loss und Accuracy fuer diese Epoche.
     return total_loss / total, correct / total
 
 
@@ -137,23 +114,15 @@ def macro_f1_from_confusion(confusion):
     # Samples sie hat.
     scores = []
     for class_id in range(confusion.shape[0]):
-        # True Positive: Klasse wurde korrekt als sich selbst vorhergesagt.
         true_positive = confusion[class_id, class_id].item()
 
-        # False Positive: Modell sagt diese Klasse, aber die echte Klasse war
-        # eine andere. Das ist die Spaltensumme minus True Positive.
         false_positive = confusion[:, class_id].sum().item() - true_positive
 
-        # False Negative: Echte Klasse ist class_id, aber Modell sagt etwas
-        # anderes. Das ist die Zeilensumme minus True Positive.
         false_negative = confusion[class_id, :].sum().item() - true_positive
 
-        # Precision: Wenn das Modell diese Klasse vorhersagt, wie oft stimmt das?
         precision_denominator = true_positive + false_positive
         precision = true_positive / precision_denominator if precision_denominator else 0.0
 
-        # Recall: Von allen echten Samples dieser Klasse, wie viele findet das
-        # Modell?
         recall_denominator = true_positive + false_negative
         recall = true_positive / recall_denominator if recall_denominator else 0.0
 
@@ -165,8 +134,6 @@ def macro_f1_from_confusion(confusion):
 
 
 def main():
-    # --> die kommandozeilenargumente machen das Training reproduzierbar und flexibel
-    # Beispiel:
     # uv run python -m src.local_training --client-id 0 --epochs 50
     parser = argparse.ArgumentParser(description="Train a local UCI HAR model on one client.")
     parser.add_argument("--client-id", type=int, default=0, help="Client shard id to train on.")
@@ -178,8 +145,6 @@ def main():
     parser.add_argument("--seed", type=int, default=42, help="Random seed.")
     args = parser.parse_args()
 
-    #   Seed fuer reproduzierbare Initialisierung und reproduzierbares Training,
-    # also soweit die verwendete Hardware deterministisch arbeitet.
     torch.manual_seed(args.seed)
     device = get_device()
 
@@ -207,9 +172,6 @@ def main():
         train_loss, train_acc = train_one_epoch(model, train_loader, criterion, optimizer, device)
         test_loss, test_acc, _ = evaluate(model, test_loader, criterion, device)
 
-        #   Wenn diese Epoche besser ist als alle bisherigen, sichern wir die
-        # Gewichte. deepcopy ist wichtig, damit spaetere Updates den gespeicherten
-        #   Zustand nicht versehentlich veraendern.
         if test_acc > best_accuracy:
             best_accuracy = test_acc
             best_epoch = epoch
@@ -221,7 +183,6 @@ def main():
             f"test loss {test_loss:.4f} acc {test_acc:.4f}"
         )
 
-    # Am Ende laden wir den besten Zustand zurueck und evaluieren genau diesen.
     model.load_state_dict(best_state)
     test_loss, test_acc, confusion = evaluate(model, test_loader, criterion, device)
     macro_f1 = macro_f1_from_confusion(confusion)
