@@ -30,8 +30,11 @@ def env_str(name: str, default: str) -> str:
     return os.environ.get(name, default)
 
 
-def weighted_average(metrics):
-    total_examples = sum(num_examples for num_examples, _ in metrics)
+def weighted_average(metrics):  # metrics is a list of the num_examples and metrics, aggregated cross-clients by flower
+    # gets called by flower internally, gets called on (num_examples, metric_dict) subset of (model_params, num_exapmles, metric_dict) tuple that client's fit function returns
+    # averages over train loss & acc that each client returns after training
+    # weights each client's train loss/performance by the amount of training samples it had (important for settings where clients had different amount of train samples)
+    total_examples = sum(num_examples for num_examples, _ in metrics)   # count/sum the num_expamples over the [metrics_client1, metrics_client2, metrics_client3, ...]
     if total_examples == 0:
         return {}
 
@@ -47,16 +50,20 @@ def weighted_average(metrics):
     return {"train_loss": train_loss, "train_accuracy": train_accuracy}
 
 
+# define closure to pass evaluate_global fn with flower-defined params directly to server
+# use closure to input more into evaluate_global with adding more input params than flower would expect
+# also nicer than instantiate test_loader/criterion in main part then input
 def get_evaluate_fn(hidden_dim: int, dropout: float, run_logger: RunLogger):
-    device = get_device()
-    test_loader = get_test_loader(batch_size=256)
+    device = get_device()   # cpu most of the time, device≠client
+    test_loader = get_test_loader(batch_size=256)       # loads pre-saved .npz with test data, returns torch Dataloader
     criterion = nn.CrossEntropyLoss()
 
     def evaluate_global(server_round, parameters, config):
         model = ActivityMLP(hidden_dim=hidden_dim, dropout=dropout).to(device)
         set_model_parameters(model, parameters)
-        loss, accuracy, confusion = evaluate(model, test_loader, criterion, device)
-        macro_f1 = macro_f1_from_confusion(confusion)
+        loss, accuracy, confusion = evaluate(model, test_loader, criterion, device) # just forward passes over test data + calculates accuracy and confusion mat
+        # takes f1 for each class vs all others, then averages assigning same weight (irregardless of #samples in that class) to all classes when averaging
+        macro_f1 = macro_f1_from_confusion(confusion) 
         run_logger.log_metric(
             {
                 "phase": "evaluate",
@@ -88,14 +95,16 @@ class SaveModelStrategy(fl.server.strategy.FedAvg):
         self.dropout = dropout
 
     def aggregate_fit(self, server_round, results, failures):
-        aggregated_parameters, aggregated_metrics = super().aggregate_fit(
+        # result etc comes from clients and encompasses params, num_samples and metrics (used for weighted_avg)
+        aggregated_parameters, aggregated_metrics = super().aggregate_fit(  # call/execute FedAvg
             server_round,
             results,
             failures,
         )
+        # aggregated_parameters is in flowers' own parameter format, not numpy, need to re-convert!
         if aggregated_parameters is not None:
             ndarrays = parameters_to_ndarrays(aggregated_parameters)
-            save_model_parameters(
+            save_model_parameters(      # saves averaged models as torch model
                 ndarrays,
                 self.model_path,
                 hidden_dim=self.hidden_dim,
@@ -123,6 +132,10 @@ class SaveModelStrategy(fl.server.strategy.FedAvg):
 
 
 def get_fit_config_fn(local_epochs: int):
+    # clients call fit_config at each round, and then get the same local_epochs number that we specified
+    # becuase in the get_fit_config_fn the fit_config function is init with the same local_epochs (independent of server_round), this will stay consistent
+    # we do this because flower framework works with such a function
+    # could implement something more complicated here: do less local epochs (so on each client) the higher the round etc.
     def fit_config(server_round: int):
         return {"local_epochs": local_epochs}
 
@@ -134,8 +147,8 @@ def main():
     parser.add_argument(
         "--server-address",
         type=str,
-        default=env_str("SERVER_ADDRESS", "0.0.0.0:8080"),
-        help="Address the Flower server should bind to.",
+        default=env_str("SERVER_ADDRESS", "0.0.0.0:8080"),  # server uses 0.0.0.0 not local host, so it listens to all incoming network interfaces/connections (from own and other devices), waits at 8080 port as standard
+        help="Address & port the Flower server should bind to.",
     )
     parser.add_argument(
         "--rounds",
@@ -152,7 +165,7 @@ def main():
     parser.add_argument(
         "--local-epochs",
         type=int,
-        default=env_int("LOCAL_EPOCHS", 1),
+        default=env_int("LOCAL_EPOCHS", 1),     # set low for initial testing
         help="Local epochs per client and round.",
     )
     parser.add_argument(
@@ -200,8 +213,8 @@ def main():
     args = parser.parse_args()
 
     run_dir = args.runs_dir / args.run_id
-    model_path = args.model_path or run_dir / "federated_global.pt"
-    run_logger = RunLogger(run_dir)
+    model_path = args.model_path or run_dir / "federated_global.pt"     # final aggregated model
+    run_logger = RunLogger(run_dir)     # imported from run_logging script
     run_logger.write_config(
         {
             "run_id": args.run_id,
@@ -221,6 +234,8 @@ def main():
 
     torch.manual_seed(42)
     initial_model = ActivityMLP(hidden_dim=args.hidden_dim, dropout=args.dropout)
+    # get model parameters/weights (in pytorch statedict) -> list of params as numpy arrays
+    # because flower expects numpy for weights
     initial_parameters = ndarrays_to_parameters(get_model_parameters(initial_model))
 
     strategy = SaveModelStrategy(
@@ -228,17 +243,18 @@ def main():
         run_logger=run_logger,
         hidden_dim=args.hidden_dim,
         dropout=args.dropout,
-        fraction_fit=1.0,
-        fraction_evaluate=0.0,
+        fraction_fit=1.0,            # use all clients in each round to do FedAvg
+        fraction_evaluate=0.0,      # no client-specific eval, just on global model
         min_fit_clients=args.num_clients,
-        min_available_clients=args.num_clients,
+        min_available_clients=args.num_clients,     # need to wait for all clients in each round, not less
         min_evaluate_clients=0,
         initial_parameters=initial_parameters,
-        on_fit_config_fn=get_fit_config_fn(args.local_epochs),
-        fit_metrics_aggregation_fn=weighted_average,
-        evaluate_fn=get_evaluate_fn(args.hidden_dim, args.dropout, run_logger),
+        on_fit_config_fn=get_fit_config_fn(args.local_epochs),  # pass function that clients can call to know how much epochs to train at each round
+        fit_metrics_aggregation_fn=weighted_average,    # how to weigh clients performances to aggregate
+        evaluate_fn=get_evaluate_fn(args.hidden_dim, args.dropout, run_logger),     # evalute fn for the server
     )
 
+    # built-in flower server func expects custom strategy class where we can add our own logging and other functionalities
     fl.server.start_server(
         server_address=args.server_address,
         config=fl.server.ServerConfig(num_rounds=args.rounds),

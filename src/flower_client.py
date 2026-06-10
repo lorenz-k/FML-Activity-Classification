@@ -37,7 +37,7 @@ class HarFlowerClient(fl.client.NumPyClient):
         self.epochs = epochs
         self.device = get_device()
         self.train_loader = get_client_loader(client_id, batch_size=batch_size)
-        self.model = ActivityMLP(hidden_dim=hidden_dim, dropout=dropout).to(self.device)
+        self.model = ActivityMLP(hidden_dim=hidden_dim, dropout=dropout).to(self.device)    # new random init
         self.criterion = nn.CrossEntropyLoss()
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=learning_rate)
 
@@ -45,7 +45,7 @@ class HarFlowerClient(fl.client.NumPyClient):
         return get_model_parameters(self.model)
 
     def fit(self, parameters, config):
-        set_model_parameters(self.model, parameters)
+        set_model_parameters(self.model, parameters)    # loads param arrays into the state dict
 
         round_epochs = int(config.get("local_epochs", self.epochs))
         train_loss = 0.0
@@ -84,7 +84,7 @@ def main():
     parser.add_argument(
         "--server-address",
         type=str,
-        default=env_str("SERVER_ADDRESS", "127.0.0.1:8080"),
+        default=env_str("SERVER_ADDRESS", "127.0.0.1:8080"),     # 127.0.0.1 calls stay on local machines, adress to server's port
         help="Flower server address.",
     )
     parser.add_argument(

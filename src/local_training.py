@@ -19,7 +19,7 @@ MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
 def get_device():
     # PyTorch kann je nach Rechner auf unterschiedlicher Hardware laufen:
-    # - mps: Apple Silicon GPU/Metal, z. B. auf modernen MacBooks
+    # - mps: Apple Silicon GPU/Metal, z. B. auf modernen MacBooks, metal ab m1 chip
     # - cuda: NVIDIA GPU
     # - cpu: normaler Prozessor als universeller Fallback
     #
