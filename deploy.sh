@@ -88,13 +88,13 @@ wait
 
 
 echo "Waiting for federated training to finish..."
+sleep 15
 
 gcloud compute ssh fl-server \
   --zone="$ZONE" \
   --project="$PROJECT" \
   --command="
-    sudo docker wait fl-server
-    sudo docker logs fl-server
+    sudo docker logs -f fl-server
   "
 
 echo ""
