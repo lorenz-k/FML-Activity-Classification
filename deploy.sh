@@ -86,6 +86,17 @@ for i in 0 1 2 3; do
 done
 wait
 
+
+echo "Waiting for federated training to finish..."
+
+gcloud compute ssh fl-server \
+  --zone="$ZONE" \
+  --project="$PROJECT" \
+  --command="
+    sudo docker wait fl-server
+    sudo docker logs fl-server
+  "
+
 echo ""
 echo "=== Deployment complete ==="
 echo "Logs: gcloud compute ssh fl-server --zone=$ZONE --command='sudo docker logs -f fl-server'"
