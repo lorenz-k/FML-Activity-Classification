@@ -13,8 +13,16 @@ import streamlit as st
 BASE_DIR = Path(__file__).resolve().parent.parent
 RUNS_DIR = BASE_DIR / "outputs" / "runs"
 BATCHES_DIR = BASE_DIR / "outputs" / "batches"
+CLOUD_RUNS_DIR = BASE_DIR / "outputs" / "cloud_runs"
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
+
+CLOUD_PROJECT = "fml-ac"
+CLOUD_ZONE = "europe-west3-a"
+CLOUD_REGION = "europe-west3"
+CLOUD_IMAGE = f"{CLOUD_REGION}-docker.pkg.dev/{CLOUD_PROJECT}/{CLOUD_PROJECT}/fml-flower:latest"
+CLOUD_SERVER_IP = "10.156.0.2"
+CLOUD_VMS = ["fl-server", "fl-client-0", "fl-client-1", "fl-client-2", "fl-client-3"]
 
 from src.run_logging import default_run_id
 
@@ -180,6 +188,135 @@ def start_batch(batch_id: str, configs: list[dict[str, Any]]) -> None:
 def delete_run(run_dir: Path) -> None:
     if run_dir.exists() and run_dir.is_dir():
         shutil.rmtree(run_dir)
+
+
+# --- Cloud helpers ---
+
+@st.cache_data(ttl=20)
+def get_vm_statuses() -> dict[str, str]:
+    try:
+        result = subprocess.run(
+            [
+                "gcloud", "compute", "instances", "list",
+                "--project", CLOUD_PROJECT,
+                "--zones", CLOUD_ZONE,
+                "--filter", "name:(" + " ".join(CLOUD_VMS) + ")",
+                "--format", "csv(name,status)",
+            ],
+            capture_output=True, text=True, timeout=15,
+        )
+        statuses: dict[str, str] = {}
+        for line in result.stdout.strip().splitlines()[1:]:
+            if "," in line:
+                name, status = line.split(",", 1)
+                statuses[name.strip()] = status.strip()
+        return statuses
+    except Exception:
+        return {}
+
+
+def start_cloud_run_background(config: dict[str, Any]) -> None:
+    run_id = config["run_id"]
+    cloud_run_dir = CLOUD_RUNS_DIR / run_id
+    cloud_run_dir.mkdir(parents=True, exist_ok=True)
+
+    script = f"""#!/bin/bash
+set -e
+PROJECT="{CLOUD_PROJECT}"
+ZONE="{CLOUD_ZONE}"
+REGION="{CLOUD_REGION}"
+IMAGE="{CLOUD_IMAGE}"
+SERVER_IP="{CLOUD_SERVER_IP}"
+RUN_ID="{run_id}"
+ROUNDS="{config['rounds']}"
+NUM_CLIENTS="{config['num_clients']}"
+LOCAL_EPOCHS="{config['local_epochs']}"
+BATCH_SIZE="{config['batch_size']}"
+LR="{config['learning_rate']}"
+HIDDEN_DIM="{config['hidden_dim']}"
+DROPOUT="{config['dropout']}"
+LOCAL_RUNS="{RUNS_DIR}"
+
+echo "[$(date -u +%H:%M:%S)] Starting server on fl-server..."
+gcloud compute ssh fl-server --zone=$ZONE --project=$PROJECT --command="
+  sudo docker stop fl-server 2>/dev/null || true
+  sudo docker rm fl-server 2>/dev/null || true
+  gcloud auth print-access-token | sudo docker login -u oauth2accesstoken --password-stdin $REGION-docker.pkg.dev
+  sudo docker pull $IMAGE
+  sudo docker run -d --name fl-server \\
+    -p 8080:8080 \\
+    -e RUN_ID=$RUN_ID -e ROUNDS=$ROUNDS -e NUM_CLIENTS=$NUM_CLIENTS \\
+    -e LOCAL_EPOCHS=$LOCAL_EPOCHS -e BATCH_SIZE=$BATCH_SIZE \\
+    -e LR=$LR -e HIDDEN_DIM=$HIDDEN_DIM -e DROPOUT=$DROPOUT \\
+    $IMAGE python -m src.flower_server --server-address 0.0.0.0:8080
+  echo Server started.
+"
+
+echo "[$(date -u +%H:%M:%S)] Waiting 10s for server to be ready..."
+sleep 10
+
+echo "[$(date -u +%H:%M:%S)] Starting clients..."
+for i in 0 1 2 3; do
+  gcloud compute ssh fl-client-$i --zone=$ZONE --project=$PROJECT --command="
+    sudo docker stop fl-client 2>/dev/null || true
+    sudo docker rm fl-client 2>/dev/null || true
+    gcloud auth print-access-token | sudo docker login -u oauth2accesstoken --password-stdin $REGION-docker.pkg.dev
+    sudo docker pull $IMAGE
+    sudo docker run -d --name fl-client \\
+      -e CLIENT_ID=$i -e SERVER_ADDRESS=$SERVER_IP:8080 \\
+      -e LOCAL_EPOCHS=$LOCAL_EPOCHS -e BATCH_SIZE=$BATCH_SIZE \\
+      -e LR=$LR -e HIDDEN_DIM=$HIDDEN_DIM -e DROPOUT=$DROPOUT \\
+      $IMAGE python -m src.flower_client
+    echo Client $i started.
+  " &
+done
+wait
+
+echo "[$(date -u +%H:%M:%S)] All clients started. Waiting for training to complete..."
+while true; do
+  STATUS=$(gcloud compute ssh fl-server --zone=$ZONE --project=$PROJECT \\
+    --command="sudo docker inspect -f '{{{{.State.Status}}}}' fl-server 2>/dev/null || echo not_found" 2>/dev/null || echo error)
+  echo "[$(date -u +%H:%M:%S)] Server container: $STATUS"
+  [ "$STATUS" = "exited" ] && break
+  sleep 15
+done
+
+echo "[$(date -u +%H:%M:%S)] Training complete. Fetching outputs..."
+gcloud compute ssh fl-server --zone=$ZONE --project=$PROJECT --command="
+  sudo docker cp fl-server:/app/outputs/runs/$RUN_ID /tmp/$RUN_ID 2>/dev/null || true
+  sudo chmod -R a+r /tmp/$RUN_ID 2>/dev/null || true
+"
+mkdir -p "$LOCAL_RUNS"
+gcloud compute scp --recurse fl-server:/tmp/$RUN_ID "$LOCAL_RUNS/" \\
+  --zone=$ZONE --project=$PROJECT && \\
+  echo "[$(date -u +%H:%M:%S)] Outputs saved to $LOCAL_RUNS/$RUN_ID" || \\
+  echo "[$(date -u +%H:%M:%S)] WARNING: Failed to copy outputs — use Fetch button in dashboard."
+
+echo "[$(date -u +%H:%M:%S)] Cloud run complete."
+"""
+
+    script_path = cloud_run_dir / "run.sh"
+    script_path.write_text(script, encoding="utf-8")
+    script_path.chmod(0o755)
+
+    log_file = (cloud_run_dir / "run.log").open("a", encoding="utf-8")
+    subprocess.Popen(
+        ["bash", str(script_path)],
+        stdout=log_file,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+    )
+    log_file.close()
+
+
+def discover_cloud_runs() -> list[Path]:
+    if not CLOUD_RUNS_DIR.exists():
+        return []
+    return sorted(
+        [p for p in CLOUD_RUNS_DIR.iterdir() if p.is_dir()],
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
 
 
 def latest_round_events(metrics: pd.DataFrame, phase: str) -> pd.DataFrame:
@@ -556,31 +693,177 @@ def render_run_picker(runs: list[Path]) -> list[Path]:
     return selected_runs
 
 
+def render_cloud_sidebar() -> None:
+    with st.sidebar.expander("Cloud (GCP)"):
+        hdr, btn = st.columns([3, 1])
+        hdr.markdown("**VM Status**")
+        if btn.button("↻", key="refresh_vms", help="Refresh"):
+            get_vm_statuses.clear()
+            st.rerun()
+
+        statuses = get_vm_statuses()
+        icons = {"RUNNING": "🟢", "TERMINATED": "🔴", "STAGING": "🟡", "STOPPING": "🟡"}
+        if statuses:
+            for vm in CLOUD_VMS:
+                s = statuses.get(vm, "?")
+                st.caption(f"{icons.get(s, '⚫')} {vm}: {s}")
+        else:
+            st.caption("Could not reach gcloud")
+
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("Start VMs", key="btn_start_vms", use_container_width=True):
+                subprocess.Popen(
+                    ["gcloud", "compute", "instances", "start"] + CLOUD_VMS
+                    + ["--zone", CLOUD_ZONE, "--project", CLOUD_PROJECT],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                )
+                get_vm_statuses.clear()
+                st.success("Starting VMs (~30s)...")
+        with c2:
+            if st.button("Stop VMs", key="btn_stop_vms", use_container_width=True):
+                subprocess.Popen(
+                    ["gcloud", "compute", "instances", "stop"] + CLOUD_VMS
+                    + ["--zone", CLOUD_ZONE, "--project", CLOUD_PROJECT],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                )
+                get_vm_statuses.clear()
+                st.success("Stopping VMs...")
+
+        st.divider()
+
+        if "next_cloud_run_id" not in st.session_state:
+            st.session_state["next_cloud_run_id"] = "gcp_" + default_run_id()
+
+        with st.form("cloud_run_form"):
+            st.markdown("**New Cloud Run**")
+            run_id = st.text_input("Run ID", value=st.session_state["next_cloud_run_id"])
+            rounds = st.number_input("Rounds", min_value=1, max_value=50, value=5, step=1)
+            num_clients = st.number_input("Clients", min_value=1, max_value=4, value=4, step=1)
+            local_epochs = st.number_input("Local Epochs", min_value=1, max_value=20, value=1, step=1)
+            learning_rate = st.number_input(
+                "Learning Rate", min_value=0.00001, max_value=1.0,
+                value=0.001, step=0.0001, format="%.5f",
+            )
+            batch_size = st.selectbox("Batch Size", options=[16, 32, 64, 128, 256], index=2)
+            hidden_dim = st.selectbox("Hidden Dim", options=[64, 128, 256, 512], index=1)
+            dropout = st.slider("Dropout", min_value=0.0, max_value=0.8, value=0.2, step=0.05)
+            submitted = st.form_submit_button("Start Cloud Run")
+
+        if submitted:
+            if not run_id.strip():
+                st.sidebar.error("Run ID is required.")
+            else:
+                start_cloud_run_background({
+                    "run_id": run_id.strip(),
+                    "rounds": int(rounds),
+                    "num_clients": int(num_clients),
+                    "local_epochs": int(local_epochs),
+                    "learning_rate": float(learning_rate),
+                    "batch_size": int(batch_size),
+                    "hidden_dim": int(hidden_dim),
+                    "dropout": float(dropout),
+                })
+                st.session_state["next_cloud_run_id"] = "gcp_" + default_run_id()
+                st.sidebar.success(f"Cloud run '{run_id.strip()}' started.")
+                st.rerun()
+
+
+def render_cloud_tab() -> None:
+    cloud_runs = discover_cloud_runs()
+    if not cloud_runs:
+        st.info("No cloud runs yet. Start one from the Cloud (GCP) section in the sidebar.")
+        return
+
+    selected_name = st.selectbox("Cloud Run", options=[p.name for p in cloud_runs])
+    if not selected_name:
+        return
+
+    run_dir = next(p for p in cloud_runs if p.name == selected_name)
+    log_path = run_dir / "run.log"
+
+    hdr, btn = st.columns([4, 1])
+    hdr.markdown(f"**Log: {selected_name}**")
+    if btn.button("↻ Refresh", key="refresh_cloud_log"):
+        st.rerun()
+
+    log_text = read_text_tail(log_path, max_lines=100)
+    if log_text:
+        st.code(log_text, language="bash")
+    else:
+        st.caption("No log output yet — the background script may still be starting.")
+
+    st.divider()
+
+    local_run = RUNS_DIR / selected_name
+    if local_run.exists():
+        st.success(f"Outputs available — visible in 'Local Runs' tab as '{selected_name}'.")
+    else:
+        st.caption("Outputs are fetched automatically when training finishes. Use the button below if needed.")
+        if st.button("Fetch Outputs from Server", key="fetch_outputs"):
+            with st.spinner("Copying outputs from fl-server..."):
+                try:
+                    subprocess.run(
+                        [
+                            "gcloud", "compute", "ssh", "fl-server",
+                            "--zone", CLOUD_ZONE, "--project", CLOUD_PROJECT,
+                            "--command",
+                            f"sudo docker cp fl-server:/app/outputs/runs/{selected_name} /tmp/{selected_name} 2>/dev/null; "
+                            f"sudo chmod -R a+r /tmp/{selected_name} 2>/dev/null || true",
+                        ],
+                        check=False, capture_output=True, timeout=60,
+                    )
+                    RUNS_DIR.mkdir(parents=True, exist_ok=True)
+                    subprocess.run(
+                        [
+                            "gcloud", "compute", "scp", "--recurse",
+                            f"fl-server:/tmp/{selected_name}",
+                            str(RUNS_DIR) + "/",
+                            "--zone", CLOUD_ZONE, "--project", CLOUD_PROJECT,
+                        ],
+                        check=True, capture_output=True, timeout=120,
+                    )
+                    st.success("Outputs fetched. Switch to 'Local Runs' tab to view them.")
+                    st.rerun()
+                except subprocess.CalledProcessError as exc:
+                    stderr = exc.stderr.decode() if isinstance(exc.stderr, bytes) else str(exc.stderr)
+                    st.error(f"Failed to fetch outputs: {stderr}")
+                except subprocess.TimeoutExpired:
+                    st.error("Timeout while fetching outputs.")
+
+
 def main() -> None:
     st.title("FML HAR Dashboard")
     render_start_form()
     render_batch_form()
     render_batch_status()
+    render_cloud_sidebar()
 
-    runs = discover_runs()
-    if not runs:
-        st.info("No runs found yet. Start a Flower run to create outputs/runs/<run_id>.")
-        return
+    local_tab, cloud_tab = st.tabs(["Runs", "Cloud Logs"])
 
-    selected_runs = render_run_picker(runs)
+    with cloud_tab:
+        render_cloud_tab()
 
-    if not selected_runs:
-        st.warning("Select at least one run.")
-        return
+    with local_tab:
+        runs = discover_runs()
+        if not runs:
+            st.info("No runs found yet. Start a Flower run to create outputs/runs/<run_id>.")
+            return
 
-    st.markdown("**Run Comparison**")
-    render_comparison(selected_runs)
+        selected_runs = render_run_picker(runs)
 
-    st.divider()
-    detail_name = st.selectbox("Run Detail", options=[path.name for path in selected_runs])
-    detail_run = next(path for path in selected_runs if path.name == detail_name)
-    config, metrics = load_run(detail_run)
-    render_run_detail(detail_run, config, metrics)
+        if not selected_runs:
+            st.warning("Select at least one run.")
+            return
+
+        st.markdown("**Run Comparison**")
+        render_comparison(selected_runs)
+
+        st.divider()
+        detail_name = st.selectbox("Run Detail", options=[path.name for path in selected_runs])
+        detail_run = next(path for path in selected_runs if path.name == detail_name)
+        config, metrics = load_run(detail_run)
+        render_run_detail(detail_run, config, metrics)
 
 
 if __name__ == "__main__":
