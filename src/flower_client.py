@@ -32,11 +32,14 @@ class HarFlowerClient(fl.client.NumPyClient):
         learning_rate: float,
         hidden_dim: int,
         dropout: float,
+        data_dir=None,
     ):
         self.client_id = client_id
         self.epochs = epochs
         self.device = get_device()
-        self.train_loader = get_client_loader(client_id, batch_size=batch_size)
+        self.train_loader = get_client_loader(
+            client_id, batch_size=batch_size, data_dir=data_dir
+        )
         self.model = ActivityMLP(hidden_dim=hidden_dim, dropout=dropout).to(self.device)    # new random init
         self.criterion = nn.CrossEntropyLoss()
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=learning_rate)
@@ -117,6 +120,12 @@ def main():
         default=env_float("DROPOUT", 0.2),
         help="Dropout probability.",
     )
+    parser.add_argument(
+        "--data-dir",
+        type=str,
+        default=env_str("FML_DATA_DIR", None),
+        help="Directory holding client_<id>.npz shards (default: outputs/har).",
+    )
     args = parser.parse_args()
 
     client = HarFlowerClient(
@@ -126,6 +135,7 @@ def main():
         learning_rate=args.lr,
         hidden_dim=args.hidden_dim,
         dropout=args.dropout,
+        data_dir=args.data_dir,
     )
 
     fl.client.start_client(

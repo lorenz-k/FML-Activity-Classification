@@ -26,7 +26,7 @@ def write_json(path: Path, payload: dict[str, Any]) -> None:
 
 
 def runner_command(config: dict[str, Any]) -> list[str]:
-    return [
+    command = [
         sys.executable,
         "-m",
         "src.experiment_runner",
@@ -47,6 +47,16 @@ def runner_command(config: dict[str, Any]) -> list[str]:
         "--dropout",
         str(config["dropout"]),
     ]
+    # federated setup dimensions (defaults keep older configs working)
+    command += [
+        "--partition-mode", str(config.get("partition_mode", "iid")),
+        "--client-size-mode", str(config.get("client_size_mode", "balanced")),
+        "--alpha", str(config.get("alpha", 0.5)),
+        "--fraction-fit", str(config.get("fraction_fit", 1.0)),
+        "--min-fit-clients", str(config.get("min_fit_clients", 0)),
+        "--seed", str(config.get("seed", 42)),
+    ]
+    return command
 
 
 def main() -> int:

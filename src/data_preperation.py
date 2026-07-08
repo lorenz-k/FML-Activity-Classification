@@ -17,6 +17,7 @@ Usage:
 """
 
 import argparse
+import json
 import shutil
 import urllib.request
 import zipfile
@@ -25,11 +26,11 @@ from pathlib import Path
 import numpy as np
 
 # paths
-BASE_DIR   = Path(__file__).parent.parent
-CACHE_DIR  = BASE_DIR / "cache"
-OUTPUT_DIR = BASE_DIR / "outputs" / "har"
+BASE_DIR    = Path(__file__).parent.parent
+CACHE_DIR   = BASE_DIR / "cache"
+DEFAULT_DIR = BASE_DIR / "outputs" / "har"
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+DEFAULT_DIR.mkdir(parents=True, exist_ok=True)
 
 # dataset constants
 HAR_URL       = (
@@ -125,33 +126,136 @@ def load_har_real():
 
 
 
-# IID partition
+# Client size weights
 
-def partition_iid(X: np.ndarray, y: np.ndarray, n_clients: int, seed: int):
-    # partition into n_clients partittions with random shuffle and random inedx split
+def client_fractions(client_size_mode: str, n_clients: int):
+    # how many samples each client gets, as fractions of the train split.
+    if client_size_mode == "balanced":
+        return [1.0 / n_clients] * n_clients
+    if client_size_mode == "imbalanced":
+        if n_clients == 4:
+            return [0.50, 0.25, 0.15, 0.10]
+        # generic geometric decay for other client counts
+        weights = np.array([0.5 ** i for i in range(n_clients)], dtype=float)
+        return (weights / weights.sum()).tolist()
+    raise ValueError(f"unknown client_size_mode: {client_size_mode}")
+
+
+def target_sizes(fractions, n_total: int):
+    # turn fractions into integer sample counts that sum exactly to n_total
+    fr = np.array(fractions, dtype=float)
+    fr = fr / fr.sum()
+    sizes = np.floor(fr * n_total).astype(int)
+    remainder = n_total - int(sizes.sum())
+    for i in range(remainder):
+        sizes[i % len(sizes)] += 1
+    return sizes.tolist()
+
+
+# Partitioning
+
+def partition_iid(X: np.ndarray, y: np.ndarray, sizes, seed: int):
+    # random shuffle, then hand out `sizes[i]` samples to each client.
+    # every client ends up with a roughly global class distribution.
     idx = np.random.default_rng(seed).permutation(len(y))
-    shards = np.array_split(idx, n_clients)
-    splits = [(X[s], y[s]) for s in shards]
-    print(f"split data into {n_clients} clients, "
-          f"sizes = {[len(s[1]) for s in splits]}")
+    splits = []
+    start = 0
+    for size in sizes:
+        sel = idx[start:start + size]
+        splits.append((X[sel], y[sel]))
+        start += size
     return splits
+
+
+def partition_label_skew(X: np.ndarray, y: np.ndarray, sizes, alpha: float, seed: int):
+    # Dirichlet label-skew partitioning (non-IID).
+    # For each client we draw a class-proportion vector from Dirichlet(alpha):
+    #   alpha large (e.g. 10) -> proportions near uniform -> almost IID
+    #   alpha small (e.g. 0.3) -> proportions very peaked  -> strong non-IID
+    # We then fill each client up to its target size by sampling (without
+    # replacement) from per-class pools according to those proportions.
+    rng = np.random.default_rng(seed)
+    classes = list(range(N_CLASSES))
+
+    pools = {k: list(rng.permutation(np.where(y == k)[0])) for k in classes}
+    props = rng.dirichlet(alpha * np.ones(N_CLASSES), size=len(sizes))
+
+    client_indices = [[] for _ in sizes]
+    for c, size in enumerate(sizes):
+        need = int(size)
+        while need > 0:
+            available = [k for k in classes if pools[k]]
+            if not available:
+                break
+            p = np.array([props[c][k] for k in available], dtype=float)
+            p = np.ones(len(available)) if p.sum() == 0 else p / p.sum()
+            k = available[rng.choice(len(available), p=p)]
+            client_indices[c].append(pools[k].pop())
+            need -= 1
+
+    # assign any leftover samples (pool exhaustion) round-robin so nothing is lost
+    leftover = [idx for k in classes for idx in pools[k]]
+    for i, idx in enumerate(leftover):
+        client_indices[i % len(sizes)].append(idx)
+
+    return [(X[np.array(ci)], y[np.array(ci)]) for ci in client_indices]
+
+
+def make_partition(X, y, n_clients, partition_mode, client_size_mode, alpha, seed):
+    fractions = client_fractions(client_size_mode, n_clients)
+    sizes = target_sizes(fractions, len(y))
+    if partition_mode == "iid":
+        splits = partition_iid(X, y, sizes, seed)
+    elif partition_mode == "label_skew":
+        splits = partition_label_skew(X, y, sizes, alpha, seed)
+    else:
+        raise ValueError(f"unknown partition_mode: {partition_mode}")
+    print(f"partition_mode={partition_mode}  client_size_mode={client_size_mode}  "
+          f"alpha={alpha}")
+    print(f"split data into {n_clients} clients, sizes = {[len(s[1]) for s in splits]}")
+    return splits
+
+
+def class_distribution(splits):
+    dist = {}
+    for i, (_, y) in enumerate(splits):
+        counts = np.bincount(y, minlength=N_CLASSES)
+        dist[f"client_{i}"] = {LABEL_MAP[k]: int(counts[k]) for k in range(N_CLASSES)}
+    return dist
 
 
 # save
 
-def save_clients(splits):
+def save_clients(splits, output_dir: Path):
     # write client_i.npz files
-
     for i, (X, y) in enumerate(splits):
-        path = OUTPUT_DIR / f"client_{i}.npz"
+        path = output_dir / f"client_{i}.npz"
         np.savez_compressed(path, X=X, y=y)
         print(f"saved {path.relative_to(BASE_DIR)}  X={X.shape}  y={y.shape}")
 
 
-def save_test_set(X_test: np.ndarray, y_test: np.ndarray):
-    path = OUTPUT_DIR / "test_global.npz"
+def save_test_set(X_test: np.ndarray, y_test: np.ndarray, output_dir: Path):
+    path = output_dir / "test_global.npz"
     np.savez_compressed(path, X=X_test, y=y_test)
     print(f"saved {path.relative_to(BASE_DIR)}  X={X_test.shape}  y={y_test.shape}")
+
+
+def save_meta(splits, output_dir: Path, *, partition_mode, client_size_mode, alpha,
+              seed, n_clients):
+    # meta.json travels with the partition so any run can show how its data looked
+    meta = {
+        "partition_mode": partition_mode,
+        "client_size_mode": client_size_mode,
+        "alpha": alpha,
+        "seed": seed,
+        "n_clients": n_clients,
+        "client_sizes": [int(len(y)) for _, y in splits],
+        "class_distribution": class_distribution(splits),
+    }
+    path = output_dir / "meta.json"
+    path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
+    print(f"saved {path.relative_to(BASE_DIR)}")
+    return meta
 
 # ══════════════════════════════════════════════════════════════════════════════
 # CLI
@@ -167,9 +271,25 @@ def main():
                         help="Number of FL clients (default: 4)")
     parser.add_argument("--seed", type=int, default=42,
                         help="Random seed for reproducibility (default: 42)")
+    parser.add_argument("--partition-mode", choices=["iid", "label_skew"],
+                        default="iid",
+                        help="iid = uniform classes per client; "
+                             "label_skew = Dirichlet non-IID (default: iid)")
+    parser.add_argument("--client-size-mode", choices=["balanced", "imbalanced"],
+                        default="balanced",
+                        help="balanced = equal client sizes; "
+                             "imbalanced = skewed client sizes (default: balanced)")
+    parser.add_argument("--alpha", type=float, default=0.5,
+                        help="Dirichlet alpha for label_skew. "
+                             "Small=strong non-IID, large=near IID (default: 0.5)")
+    parser.add_argument("--data-dir", type=Path, default=DEFAULT_DIR,
+                        help="Where to write client/test/meta files "
+                             "(default: outputs/har).")
     args = parser.parse_args()
 
     np.random.seed(args.seed)
+    output_dir = Path(args.data_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     print("\n" + "═" * 64)
     print("  UCI HAR – Federated Learning: Data Preparation")
@@ -182,14 +302,25 @@ def main():
 
     # partition
     print()
-    print("IID Partition of official train split")
-    splits = partition_iid(X_train, y_train, args.n_clients, args.seed)
+    print("Partition of official train split")
+    splits = make_partition(
+        X_train, y_train, args.n_clients,
+        args.partition_mode, args.client_size_mode, args.alpha, args.seed,
+    )
 
     # Save
     print()
-    print("Saving")
-    save_clients(splits)
-    save_test_set(X_test, y_test)
+    print(f"Saving to {output_dir}")
+    save_clients(splits, output_dir)
+    save_test_set(X_test, y_test, output_dir)
+    save_meta(
+        splits, output_dir,
+        partition_mode=args.partition_mode,
+        client_size_mode=args.client_size_mode,
+        alpha=args.alpha,
+        seed=args.seed,
+        n_clients=args.n_clients,
+    )
 
 if __name__ == "__main__":
     main()

@@ -1,4 +1,5 @@
 import argparse
+import json
 import os
 from pathlib import Path
 
@@ -53,9 +54,9 @@ def weighted_average(metrics):  # metrics is a list of the num_examples and metr
 # define closure to pass evaluate_global fn with flower-defined params directly to server
 # use closure to input more into evaluate_global with adding more input params than flower would expect
 # also nicer than instantiate test_loader/criterion in main part then input
-def get_evaluate_fn(hidden_dim: int, dropout: float, run_logger: RunLogger):
+def get_evaluate_fn(hidden_dim: int, dropout: float, run_logger: RunLogger, data_dir=None):
     device = get_device()   # cpu most of the time, device≠client
-    test_loader = get_test_loader(batch_size=256)       # loads pre-saved .npz with test data, returns torch Dataloader
+    test_loader = get_test_loader(batch_size=256, data_dir=data_dir)       # loads pre-saved .npz with test data, returns torch Dataloader
     criterion = nn.CrossEntropyLoss()
 
     def evaluate_global(server_round, parameters, config):
@@ -193,6 +194,42 @@ def main():
         help="Dropout probability.",
     )
     parser.add_argument(
+        "--fraction-fit",
+        type=float,
+        default=env_float("FRACTION_FIT", 1.0),
+        help="Fraction of available clients sampled for training each round.",
+    )
+    parser.add_argument(
+        "--min-fit-clients",
+        type=int,
+        default=env_int("MIN_FIT_CLIENTS", 0),
+        help="Minimum clients trained per round (0 = all clients).",
+    )
+    parser.add_argument(
+        "--partition-mode",
+        type=str,
+        default=env_str("PARTITION_MODE", "iid"),
+        help="Data partition mode recorded in the run config (iid | label_skew).",
+    )
+    parser.add_argument(
+        "--client-size-mode",
+        type=str,
+        default=env_str("CLIENT_SIZE_MODE", "balanced"),
+        help="Client size mode recorded in the run config (balanced | imbalanced).",
+    )
+    parser.add_argument(
+        "--alpha",
+        type=float,
+        default=env_float("ALPHA", 0.5),
+        help="Dirichlet alpha recorded in the run config (label_skew only).",
+    )
+    parser.add_argument(
+        "--data-dir",
+        type=str,
+        default=env_str("FML_DATA_DIR", None),
+        help="Directory holding the test set + meta.json (default: outputs/har).",
+    )
+    parser.add_argument(
         "--run-id",
         type=str,
         default=env_str("RUN_ID", default_run_id()),
@@ -215,6 +252,18 @@ def main():
     run_dir = args.runs_dir / args.run_id
     model_path = args.model_path or run_dir / "federated_global.pt"     # final aggregated model
     run_logger = RunLogger(run_dir)     # imported from run_logging script
+
+    # min_fit_clients == 0 means "use all clients" (keeps the old all-clients default)
+    min_fit_clients = args.min_fit_clients or args.num_clients
+
+    # if a partition meta.json exists, pull its client sizes / class distribution into
+    # the run config so the dashboard can plot the data layout for this run
+    partition_meta = {}
+    if args.data_dir:
+        meta_path = Path(args.data_dir) / "meta.json"
+        if meta_path.exists():
+            partition_meta = json.loads(meta_path.read_text(encoding="utf-8"))
+
     run_logger.write_config(
         {
             "run_id": args.run_id,
@@ -228,6 +277,16 @@ def main():
             "hidden_dim": args.hidden_dim,
             "dropout": args.dropout,
             "model_path": model_path,
+            # federated setup dimensions
+            "partition_mode": args.partition_mode,
+            "client_size_mode": args.client_size_mode,
+            "alpha": args.alpha,
+            "fraction_fit": args.fraction_fit,
+            "min_fit_clients": min_fit_clients,
+            "data_dir": args.data_dir,
+            # data layout (from meta.json if available)
+            "client_sizes": partition_meta.get("client_sizes"),
+            "class_distribution": partition_meta.get("class_distribution"),
         }
     )
     print(f"Run directory: {run_dir}")
@@ -243,15 +302,15 @@ def main():
         run_logger=run_logger,
         hidden_dim=args.hidden_dim,
         dropout=args.dropout,
-        fraction_fit=1.0,            # use all clients in each round to do FedAvg
+        fraction_fit=args.fraction_fit,     # fraction of available clients sampled per round (1.0 = all)
         fraction_evaluate=0.0,      # no client-specific eval, just on global model
-        min_fit_clients=args.num_clients,
-        min_available_clients=args.num_clients,     # need to wait for all clients in each round, not less
+        min_fit_clients=min_fit_clients,    # how many clients actually train per round
+        min_available_clients=args.num_clients,     # wait until all clients connected, then sample
         min_evaluate_clients=0,
         initial_parameters=initial_parameters,
         on_fit_config_fn=get_fit_config_fn(args.local_epochs),  # pass function that clients can call to know how much epochs to train at each round
         fit_metrics_aggregation_fn=weighted_average,    # how to weigh clients performances to aggregate
-        evaluate_fn=get_evaluate_fn(args.hidden_dim, args.dropout, run_logger),     # evalute fn for the server
+        evaluate_fn=get_evaluate_fn(args.hidden_dim, args.dropout, run_logger, args.data_dir),     # evalute fn for the server
     )
 
     # built-in flower server func expects custom strategy class where we can add our own logging and other functionalities

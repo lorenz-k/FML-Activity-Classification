@@ -62,6 +62,11 @@ def slug_value(value: Any) -> str:
     return "".join(char if char.isalnum() else "_" for char in text)
 
 
+def min_fit_from_fraction(fraction_fit: float, num_clients: int) -> int:
+    # how many clients actually train per round given a participation fraction.
+    return max(1, round(num_clients * fraction_fit))
+
+
 def parse_int_values(raw: str, label: str, min_value: int, max_value: int) -> list[int]:
     try:
         values = [int(item.strip()) for item in raw.split(",") if item.strip()]
@@ -146,6 +151,18 @@ def start_local_run(config: dict[str, Any]) -> None:
         str(config["hidden_dim"]),
         "--dropout",
         str(config["dropout"]),
+        "--partition-mode",
+        str(config.get("partition_mode", "iid")),
+        "--client-size-mode",
+        str(config.get("client_size_mode", "balanced")),
+        "--alpha",
+        str(config.get("alpha", 0.5)),
+        "--fraction-fit",
+        str(config.get("fraction_fit", 1.0)),
+        "--min-fit-clients",
+        str(config.get("min_fit_clients", 0)),
+        "--seed",
+        str(config.get("seed", 42)),
     ]
 
     subprocess.Popen(
@@ -235,6 +252,12 @@ BATCH_SIZE="{config['batch_size']}"
 LR="{config['learning_rate']}"
 HIDDEN_DIM="{config['hidden_dim']}"
 DROPOUT="{config['dropout']}"
+PARTITION_MODE="{config.get('partition_mode', 'iid')}"
+CLIENT_SIZE_MODE="{config.get('client_size_mode', 'balanced')}"
+ALPHA="{config.get('alpha', 0.5)}"
+FRACTION_FIT="{config.get('fraction_fit', 1.0)}"
+MIN_FIT_CLIENTS="{config.get('min_fit_clients', 0)}"
+SEED="{config.get('seed', 42)}"
 LOCAL_RUNS="{RUNS_DIR}"
 
 echo "[$(date -u +%H:%M:%S)] Starting server on fl-server..."
@@ -248,7 +271,11 @@ gcloud compute ssh fl-server --zone=$ZONE --project=$PROJECT --command="
     -e RUN_ID=$RUN_ID -e ROUNDS=$ROUNDS -e NUM_CLIENTS=$NUM_CLIENTS \\
     -e LOCAL_EPOCHS=$LOCAL_EPOCHS -e BATCH_SIZE=$BATCH_SIZE \\
     -e LR=$LR -e HIDDEN_DIM=$HIDDEN_DIM -e DROPOUT=$DROPOUT \\
-    $IMAGE python -m src.flower_server --server-address 0.0.0.0:8080
+    -e PARTITION_MODE=$PARTITION_MODE -e CLIENT_SIZE_MODE=$CLIENT_SIZE_MODE \\
+    -e ALPHA=$ALPHA -e FRACTION_FIT=$FRACTION_FIT -e MIN_FIT_CLIENTS=$MIN_FIT_CLIENTS \\
+    $IMAGE sh -c \\"python -m src.data_preperation --n_clients $NUM_CLIENTS --seed $SEED \\
+      --partition-mode $PARTITION_MODE --client-size-mode $CLIENT_SIZE_MODE --alpha $ALPHA && \\
+      python -m src.flower_server --server-address 0.0.0.0:8080\\"
   echo Server started.
 "
 
@@ -266,7 +293,9 @@ for i in 0 1 2 3; do
       -e CLIENT_ID=$i -e SERVER_ADDRESS=$SERVER_IP:8080 \\
       -e LOCAL_EPOCHS=$LOCAL_EPOCHS -e BATCH_SIZE=$BATCH_SIZE \\
       -e LR=$LR -e HIDDEN_DIM=$HIDDEN_DIM -e DROPOUT=$DROPOUT \\
-      $IMAGE python -m src.flower_client
+      $IMAGE sh -c \\"python -m src.data_preperation --n_clients $NUM_CLIENTS --seed $SEED \\
+        --partition-mode $PARTITION_MODE --client-size-mode $CLIENT_SIZE_MODE --alpha $ALPHA && \\
+        python -m src.flower_client\\"
     echo Client $i started.
   " &
 done
@@ -350,6 +379,51 @@ def metric_card(label: str, value: Any, fmt: str = "{:.4f}") -> None:
     st.metric(label, fmt.format(float(value)))
 
 
+def render_federated_setup(config: dict[str, Any]) -> None:
+    # small metrics row + client data-layout plots for this run
+    partition_mode = config.get("partition_mode")
+    if partition_mode is None:
+        return  # older run without the new fields
+
+    client_size_mode = config.get("client_size_mode", "n/a")
+    fraction_fit = config.get("fraction_fit")
+    min_fit = config.get("min_fit_clients")
+    num_clients = config.get("num_clients")
+
+    st.markdown("**Federated Setup**")
+    cols = st.columns(4)
+    with cols[0]:
+        st.metric("Partition", "IID" if partition_mode == "iid" else "Non-IID")
+    with cols[1]:
+        st.metric("Client Sizes", str(client_size_mode).capitalize())
+    with cols[2]:
+        if fraction_fit is not None and num_clients:
+            st.metric("Participation", f"{int(fraction_fit * 100)}% ({min_fit}/{num_clients})")
+        else:
+            st.metric("Participation", "n/a")
+    with cols[3]:
+        st.metric("Alpha", config.get("alpha") if partition_mode != "iid" else "—")
+
+    client_sizes = config.get("client_sizes")
+    class_distribution = config.get("class_distribution")
+
+    plot_cols = st.columns(2)
+    with plot_cols[0]:
+        if client_sizes:
+            st.caption("Samples per Client")
+            sizes_df = pd.DataFrame(
+                {"samples": client_sizes},
+                index=[f"client_{i}" for i in range(len(client_sizes))],
+            )
+            st.bar_chart(sizes_df, height=260)
+    with plot_cols[1]:
+        if class_distribution:
+            st.caption("Class Distribution per Client")
+            # rows = clients, columns = activity labels -> stacked bars
+            dist_df = pd.DataFrame(class_distribution).T.fillna(0)
+            st.bar_chart(dist_df, height=260)
+
+
 def render_run_detail(run_dir: Path, config: dict[str, Any], metrics: pd.DataFrame) -> None:
     st.subheader(run_dir.name)
 
@@ -382,6 +456,8 @@ def render_run_detail(run_dir: Path, config: dict[str, Any], metrics: pd.DataFra
     with config_cols[3]:
         st.caption("Dropout")
         st.write(config.get("dropout", "n/a"))
+
+    render_federated_setup(config)
 
     if metrics.empty:
         st.warning("No metrics.jsonl events found for this run.")
@@ -439,6 +515,11 @@ def render_comparison(selected_runs: list[Path]) -> None:
             {
                 "run_id": run_dir.name,
                 "status": status.get("state"),
+                "partition_mode": config.get("partition_mode"),
+                "client_size_mode": config.get("client_size_mode"),
+                "alpha": config.get("alpha"),
+                "fraction_fit": config.get("fraction_fit"),
+                "min_fit_clients": config.get("min_fit_clients"),
                 "rounds": config.get("rounds"),
                 "clients": config.get("num_clients"),
                 "local_epochs": config.get("local_epochs"),
@@ -521,6 +602,23 @@ def render_start_form() -> None:
         batch_size = st.selectbox("Batch Size", options=[16, 32, 64, 128, 256], index=2)
         hidden_dim = st.selectbox("Hidden Dim", options=[64, 128, 256, 512], index=1)
         dropout = st.slider("Dropout", min_value=0.0, max_value=0.8, value=0.2, step=0.05)
+
+        st.markdown("**Federated Setup**")
+        partition_label = st.selectbox(
+            "Partition Mode", options=["IID", "Non-IID (label skew)"], index=0
+        )
+        partition_mode = "iid" if partition_label.startswith("IID") else "label_skew"
+        client_size_label = st.selectbox(
+            "Client Sizes", options=["Balanced", "Imbalanced"], index=0
+        )
+        client_size_mode = "balanced" if client_size_label == "Balanced" else "imbalanced"
+        alpha = st.selectbox(
+            "Non-IID Alpha", options=[0.3, 0.5, 1.0], index=1,
+            help="Only used for label skew. Smaller = stronger non-IID.",
+        )
+        participation = st.selectbox("Participation", options=["100%", "50%"], index=0)
+        fraction_fit = 1.0 if participation == "100%" else 0.5
+
         overwrite = st.checkbox("Overwrite existing run", value=False)
         submitted = st.form_submit_button("Start Run")
 
@@ -546,6 +644,11 @@ def render_start_form() -> None:
             "batch_size": int(batch_size),
             "hidden_dim": int(hidden_dim),
             "dropout": float(dropout),
+            "partition_mode": partition_mode,
+            "client_size_mode": client_size_mode,
+            "alpha": float(alpha),
+            "fraction_fit": float(fraction_fit),
+            "min_fit_clients": min_fit_from_fraction(fraction_fit, int(num_clients)),
         }
     )
     st.session_state["next_run_id"] = default_run_id()
@@ -567,10 +670,27 @@ def render_batch_form() -> None:
             batch_sizes = st.text_input("Batch Sizes", value="64")
             hidden_dims = st.text_input("Hidden Dims", value="128, 256")
             dropouts = st.text_input("Dropouts", value="0.1, 0.2")
-            max_runs = st.number_input("Max Runs", min_value=1, max_value=100, value=24)
+            st.markdown("**Federated Setup**")
+            partition_modes = st.multiselect(
+                "Partition Modes", options=["iid", "label_skew"], default=["iid"],
+            )
+            client_size_modes = st.multiselect(
+                "Client Size Modes", options=["balanced", "imbalanced"], default=["balanced"],
+            )
+            participation_rates = st.multiselect(
+                "Participation Rates", options=[1.0, 0.5], default=[1.0],
+            )
+            alphas = st.text_input("Alphas (label skew)", value="0.3, 1.0")
+            max_runs = st.number_input("Max Runs", min_value=1, max_value=200, value=24)
             submitted = st.form_submit_button("Start Batch")
 
         try:
+            if not partition_modes:
+                raise ValueError("Select at least one partition mode.")
+            if not client_size_modes:
+                raise ValueError("Select at least one client size mode.")
+            if not participation_rates:
+                raise ValueError("Select at least one participation rate.")
             parsed = {
                 "rounds": parse_int_values(rounds, "Rounds", 1, 50),
                 "num_clients": parse_int_values(num_clients, "Clients", 1, 4),
@@ -579,18 +699,30 @@ def render_batch_form() -> None:
                 "batch_size": parse_int_values(batch_sizes, "Batch Sizes", 1, 1024),
                 "hidden_dim": parse_int_values(hidden_dims, "Hidden Dims", 1, 2048),
                 "dropout": parse_float_values(dropouts, "Dropouts", 0.0, 0.8),
+                "alpha": parse_float_values(alphas, "Alphas", 0.01, 100.0),
             }
-            combinations = list(
-                product(
-                    parsed["rounds"],
-                    parsed["num_clients"],
-                    parsed["local_epochs"],
-                    parsed["learning_rate"],
-                    parsed["batch_size"],
-                    parsed["hidden_dim"],
-                    parsed["dropout"],
-                )
-            )
+            combinations = []
+            seen = set()
+            for combo in product(
+                parsed["rounds"],
+                parsed["num_clients"],
+                parsed["local_epochs"],
+                parsed["learning_rate"],
+                parsed["batch_size"],
+                parsed["hidden_dim"],
+                parsed["dropout"],
+                partition_modes,
+                client_size_modes,
+                participation_rates,
+                parsed["alpha"],
+            ):
+                pmode, alpha = combo[7], combo[10]
+                # alpha is meaningless for IID — collapse to one alpha to avoid dupes
+                key = combo[:10] + ((None,) if pmode == "iid" else (alpha,))
+                if key in seen:
+                    continue
+                seen.add(key)
+                combinations.append(combo)
             st.caption(f"{len(combinations)} run combinations")
         except ValueError as exc:
             st.error(str(exc))
@@ -608,10 +740,12 @@ def render_batch_form() -> None:
             return
 
         configs = []
-        for index, (r, clients, epochs, lr, bs, hd, do) in enumerate(combinations, start=1):
+        for index, combo in enumerate(combinations, start=1):
+            r, clients, epochs, lr, bs, hd, do, pmode, csize, frac, alpha = combo
+            part_tag = "iid" if pmode == "iid" else f"noniid_a{slug_value(alpha)}"
             run_id = (
-                f"{clean_batch_id}_{index:02d}"
-                f"_lr{slug_value(lr)}_hd{slug_value(hd)}_do{slug_value(do)}"
+                f"{clean_batch_id}_{index:02d}_{part_tag}_{csize}"
+                f"_part{int(frac * 100)}_lr{slug_value(lr)}_hd{slug_value(hd)}"
             )
             configs.append(
                 {
@@ -623,6 +757,11 @@ def render_batch_form() -> None:
                     "batch_size": int(bs),
                     "hidden_dim": int(hd),
                     "dropout": float(do),
+                    "partition_mode": pmode,
+                    "client_size_mode": csize,
+                    "alpha": float(alpha),
+                    "fraction_fit": float(frac),
+                    "min_fit_clients": min_fit_from_fraction(frac, int(clients)),
                 }
             )
 
@@ -748,12 +887,25 @@ def render_cloud_sidebar() -> None:
             batch_size = st.selectbox("Batch Size", options=[16, 32, 64, 128, 256], index=2)
             hidden_dim = st.selectbox("Hidden Dim", options=[64, 128, 256, 512], index=1)
             dropout = st.slider("Dropout", min_value=0.0, max_value=0.8, value=0.2, step=0.05)
+            partition_label = st.selectbox(
+                "Partition Mode", options=["IID", "Non-IID (label skew)"], index=0,
+                key="cloud_partition",
+            )
+            client_size_label = st.selectbox(
+                "Client Sizes", options=["Balanced", "Imbalanced"], index=0,
+                key="cloud_client_size",
+            )
+            alpha = st.selectbox("Non-IID Alpha", options=[0.3, 0.5, 1.0], index=1, key="cloud_alpha")
+            participation = st.selectbox("Participation", options=["100%", "50%"], index=0, key="cloud_part")
             submitted = st.form_submit_button("Start Cloud Run")
 
         if submitted:
             if not run_id.strip():
                 st.sidebar.error("Run ID is required.")
             else:
+                partition_mode = "iid" if partition_label.startswith("IID") else "label_skew"
+                client_size_mode = "balanced" if client_size_label == "Balanced" else "imbalanced"
+                fraction_fit = 1.0 if participation == "100%" else 0.5
                 start_cloud_run_background({
                     "run_id": run_id.strip(),
                     "rounds": int(rounds),
@@ -763,6 +915,11 @@ def render_cloud_sidebar() -> None:
                     "batch_size": int(batch_size),
                     "hidden_dim": int(hidden_dim),
                     "dropout": float(dropout),
+                    "partition_mode": partition_mode,
+                    "client_size_mode": client_size_mode,
+                    "alpha": float(alpha),
+                    "fraction_fit": float(fraction_fit),
+                    "min_fit_clients": min_fit_from_fraction(fraction_fit, int(num_clients)),
                 })
                 st.session_state["next_cloud_run_id"] = "gcp_" + default_run_id()
                 st.sidebar.success(f"Cloud run '{run_id.strip()}' started.")

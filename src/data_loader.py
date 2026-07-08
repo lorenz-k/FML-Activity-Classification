@@ -12,8 +12,20 @@ from torch.utils.data import DataLoader, TensorDataset
 BASE_DIR = Path(os.environ.get("FML_BASE_DIR", Path(__file__).resolve().parent.parent))
 
 
-#output dir with har files
-OUTPUT_DIR = BASE_DIR / "outputs" / "har"
+#default output dir with har files
+DEFAULT_DATA_DIR = BASE_DIR / "outputs" / "har"
+
+
+def resolve_data_dir(data_dir=None) -> Path:
+    # priority: explicit argument > FML_DATA_DIR env var > default outputs/har.
+    # this lets us keep many partitions side by side (iid_balanced_seed42/, …)
+    # instead of always overwriting outputs/har/client_0.npz.
+    if data_dir is not None:
+        return Path(data_dir)
+    env = os.environ.get("FML_DATA_DIR")
+    if env:
+        return Path(env)
+    return DEFAULT_DATA_DIR
 
 
 def load_npz_dataset(path: Path):
@@ -41,14 +53,14 @@ def get_loader(path: Path, batch_size=32, shuffle=True):
     return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
 
 
-def get_client_loader(client_id, batch_size=32):
-    #lädt einen client , z.B. client_id=0 -> path=outputs/har/client_0.npz.
-    path = OUTPUT_DIR / f"client_{client_id}.npz"
+def get_client_loader(client_id, batch_size=32, data_dir=None):
+    #lädt einen client , z.B. client_id=0 -> path=<data_dir>/client_0.npz.
+    path = resolve_data_dir(data_dir) / f"client_{client_id}.npz"
     return get_loader(path, batch_size=batch_size, shuffle=True)
 
 
-def get_test_loader(batch_size=256):
-    # testset laden 
+def get_test_loader(batch_size=256, data_dir=None):
+    # testset laden
 
-    path = OUTPUT_DIR / "test_global.npz"
+    path = resolve_data_dir(data_dir) / "test_global.npz"
     return get_loader(path, batch_size=batch_size, shuffle=False)

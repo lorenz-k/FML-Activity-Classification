@@ -12,10 +12,51 @@ from src.run_logging import RUNS_DIR, default_run_id, json_safe
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+HAR_DIR = BASE_DIR / "outputs" / "har"
 
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def slug_value(value: Any) -> str:
+    text = str(value).replace(".", "p").replace("-", "m")
+    return "".join(char if char.isalnum() else "_" for char in text)
+
+
+def data_dir_for(partition_mode: str, client_size_mode: str, alpha: float, seed: int) -> Path:
+    # one folder per data layout so partitions don't overwrite each other, e.g.
+    # outputs/har/label_skew_imbalanced_alpha0p3_seed42/
+    parts = [partition_mode, client_size_mode]
+    if partition_mode != "iid":
+        parts.append(f"alpha{slug_value(alpha)}")
+    parts.append(f"seed{seed}")
+    return HAR_DIR / "_".join(parts)
+
+
+def ensure_data_prepared(
+    data_dir: Path, num_clients: int, partition_mode: str,
+    client_size_mode: str, alpha: float, seed: int, force: bool,
+) -> None:
+    # build the partition only if it's missing (or forced); reused across runs
+    marker = data_dir / f"client_{num_clients - 1}.npz"
+    if marker.exists() and not force:
+        print(f"Data partition already present: {data_dir}")
+        return
+    print(f"Preparing data partition: {data_dir}")
+    subprocess.run(
+        [
+            sys.executable, "-m", "src.data_preperation",
+            "--n_clients", str(num_clients),
+            "--seed", str(seed),
+            "--partition-mode", partition_mode,
+            "--client-size-mode", client_size_mode,
+            "--alpha", str(alpha),
+            "--data-dir", str(data_dir),
+        ],
+        cwd=BASE_DIR,
+        check=True,
+    )
 
 
 def write_status(run_dir: Path, status: dict[str, Any]) -> None:
@@ -70,6 +111,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--hidden-dim", type=int, default=128)
     parser.add_argument("--dropout", type=float, default=0.2)
+    # federated setup dimensions
+    parser.add_argument("--partition-mode", choices=["iid", "label_skew"], default="iid")
+    parser.add_argument("--client-size-mode", choices=["balanced", "imbalanced"], default="balanced")
+    parser.add_argument("--alpha", type=float, default=0.5)
+    parser.add_argument("--fraction-fit", type=float, default=1.0)
+    parser.add_argument("--min-fit-clients", type=int, default=0)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--data-dir", type=Path, default=None,
+                        help="Override the partition directory (default: derived from setup).")
+    parser.add_argument("--skip-data-prep", action="store_true",
+                        help="Do not (re)build the data partition before running.")
     parser.add_argument("--port", type=int, default=0)
     parser.add_argument("--startup-timeout", type=float, default=30.0)
     return parser
@@ -79,6 +131,19 @@ def main() -> int:
     args = build_parser().parse_args()
     run_dir = args.runs_dir / args.run_id
     run_dir.mkdir(parents=True, exist_ok=True)
+
+    # resolve the partition directory and make sure the shards exist
+    data_dir = args.data_dir or data_dir_for(
+        args.partition_mode, args.client_size_mode, args.alpha, args.seed
+    )
+    data_dir = Path(data_dir)
+    if not args.skip_data_prep:
+        ensure_data_prepared(
+            data_dir, args.num_clients, args.partition_mode,
+            args.client_size_mode, args.alpha, args.seed, force=False,
+        )
+
+    min_fit_clients = args.min_fit_clients or args.num_clients
 
     port = args.port or find_free_port()
     server_address = f"127.0.0.1:{port}"
@@ -119,6 +184,18 @@ def main() -> int:
         str(args.hidden_dim),
         "--dropout",
         str(args.dropout),
+        "--fraction-fit",
+        str(args.fraction_fit),
+        "--min-fit-clients",
+        str(min_fit_clients),
+        "--partition-mode",
+        args.partition_mode,
+        "--client-size-mode",
+        args.client_size_mode,
+        "--alpha",
+        str(args.alpha),
+        "--data-dir",
+        str(data_dir),
         "--run-id",
         args.run_id,
         "--runs-dir",
@@ -156,6 +233,8 @@ def main() -> int:
                 str(args.hidden_dim),
                 "--dropout",
                 str(args.dropout),
+                "--data-dir",
+                str(data_dir),
             ]
             processes.append(launch_process(client_command, log_file))
 
