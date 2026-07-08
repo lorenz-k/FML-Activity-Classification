@@ -11,17 +11,17 @@ import streamlit as st
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-RUNS_DIR = BASE_DIR / "outputs" / "runs"
+RUNS_DIR = BASE_DIR / "outputs" / "runs"                    # this is where the outputs/log files from the server will be copied to on the local machine 
 BATCHES_DIR = BASE_DIR / "outputs" / "batches"
 CLOUD_RUNS_DIR = BASE_DIR / "outputs" / "cloud_runs"
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
-CLOUD_PROJECT = "fml-ac"
+CLOUD_PROJECT = "fml-ac"            # hardcoded our GCP project name
 CLOUD_ZONE = "europe-west3-a"
 CLOUD_REGION = "europe-west3"
 CLOUD_IMAGE = f"{CLOUD_REGION}-docker.pkg.dev/{CLOUD_PROJECT}/{CLOUD_PROJECT}/fml-flower:latest"
-CLOUD_SERVER_IP = "10.156.0.2"
+CLOUD_SERVER_IP = "10.156.0.2"      # in 10.156.XX.XX subnet
 CLOUD_VMS = ["fl-server", "fl-client-0", "fl-client-1", "fl-client-2", "fl-client-3"]
 
 from src.run_logging import default_run_id
@@ -207,11 +207,12 @@ def delete_run(run_dir: Path) -> None:
         shutil.rmtree(run_dir)
 
 
-# --- Cloud helpers ---
+################### --- Cloud helpers --- #################################
 
-@st.cache_data(ttl=20)
+@st.cache_data(ttl=20)          # 20 sekunden cache, falls innerhalb von 20 sekunden im dashboard renew status geclickt wird, wird das gecachte ergebnis verwendet
 def get_vm_statuses() -> dict[str, str]:
     try:
+        # list all instances and their statuses from our FML cloud project
         result = subprocess.run(
             [
                 "gcloud", "compute", "instances", "list",
@@ -231,15 +232,21 @@ def get_vm_statuses() -> dict[str, str]:
     except Exception:
         return {}
 
-
+# gets input from the dashboard sidebar
 def start_cloud_run_background(config: dict[str, Any]) -> None:
     run_id = config["run_id"]
-    cloud_run_dir = CLOUD_RUNS_DIR / run_id
+    cloud_run_dir = CLOUD_RUNS_DIR / run_id     # this is on the local machine, not on the cloud server
     cloud_run_dir.mkdir(parents=True, exist_ok=True)
-
+    # set environment constants via the bash script, set -e ist for error handling, if one command fails, the script will stop
+    # client & server were already started in the sidebar, with names defined in CLOUD_VMS (e.g. fl-server)
+    # ssh via IAP-tunneling into the VMs, uses google gateway since VMs only have private/internal IP
+    # stop running container if one exists, 2>/dev/null suppresses error message, or || true to catch errors so it doenst crash
+    # then delete (runtime files) it, otherwise new one cant be started, raw image files stays!
+    # then generate access token, then pipe | login docker to pull the image from the region-specific registry
+    # pull image, then launch container on the VM
     script = f"""#!/bin/bash
 set -e
-PROJECT="{CLOUD_PROJECT}"
+PROJECT="{CLOUD_PROJECT}"           
 ZONE="{CLOUD_ZONE}"
 REGION="{CLOUD_REGION}"
 IMAGE="{CLOUD_IMAGE}"
@@ -326,7 +333,7 @@ echo "[$(date -u +%H:%M:%S)] Cloud run complete."
 
     script_path = cloud_run_dir / "run.sh"
     script_path.write_text(script, encoding="utf-8")
-    script_path.chmod(0o755)
+    script_path.chmod(0o755)    # from text file to executable script
 
     log_file = (cloud_run_dir / "run.log").open("a", encoding="utf-8")
     subprocess.Popen(
@@ -857,7 +864,7 @@ def render_cloud_sidebar() -> None:
                     + ["--zone", CLOUD_ZONE, "--project", CLOUD_PROJECT],
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 )
-                get_vm_statuses.clear()
+                get_vm_statuses.clear()     # clear the cache because now instances have started
                 st.success("Starting VMs (~30s)...")
         with c2:
             if st.button("Stop VMs", key="btn_stop_vms", use_container_width=True):
@@ -871,6 +878,7 @@ def render_cloud_sidebar() -> None:
 
         st.divider()
 
+        # streamlit ist stateless (gesamtes skript wieder runterlaufen), alle variablen müssen auf vorherigen stand extra nochmal gesetzt werden (daher lade/store sie im session state)
         if "next_cloud_run_id" not in st.session_state:
             st.session_state["next_cloud_run_id"] = "gcp_" + default_run_id()
 

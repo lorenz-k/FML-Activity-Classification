@@ -82,7 +82,7 @@ def main() -> int:
     }
     write_json(status_path, status)
 
-    for config in configs:
+    for config in configs:      # in for loop sequentially -> perhaps speedup via parallelization?
         status["current_run"] = config["run_id"]
         status["runs"].append({"run_id": config["run_id"], "state": "running"})
         write_json(status_path, status)
