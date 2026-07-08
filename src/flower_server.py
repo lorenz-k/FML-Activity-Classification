@@ -96,7 +96,7 @@ class SaveModelStrategy(fl.server.strategy.FedAvg):
 
     def aggregate_fit(self, server_round, results, failures):
         # result etc comes from clients and encompasses params, num_samples and metrics (used for weighted_avg)
-        aggregated_parameters, aggregated_metrics = super().aggregate_fit(  # call/execute FedAvg
+        aggregated_parameters, aggregated_metrics = super().aggregate_fit(  # call/execute FedAvg from superclass 
             server_round,
             results,
             failures,

@@ -95,6 +95,8 @@ def main() -> int:
     }
     write_status(run_dir, status)
 
+    ### LAUNCH SERVER
+
     server_log = open_log(run_dir, "server.log")
     client_logs = []
     processes = []
@@ -128,6 +130,7 @@ def main() -> int:
     server_process = launch_process(server_command, server_log)
     processes.append(server_process)
 
+    ## LAUNCH CLIENTS
     try:
         if not wait_for_port("127.0.0.1", port, args.startup_timeout):
             raise RuntimeError(f"Flower server did not open port {port}.")
