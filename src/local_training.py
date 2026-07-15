@@ -30,7 +30,12 @@ def get_device():
     return torch.device("cpu")
 
 
-def train_one_epoch(model, loader, criterion, optimizer, device):
+def train_one_epoch(model, loader, criterion, optimizer, device,
+                    global_params=None, proximal_mu=0.0):
+    # global_params + proximal_mu > 0 aktivieren FedProx (Li et al., MLSys 2020):
+    # zusaetzlich zur Task-Loss wird (mu/2)*||w - w_global||^2 optimiert, was das
+    # lokale Modell am globalen Rundenstart w^t verankert und Client-Drift bremst.
+    # Default (mu=0) = normales FedAvg-/lokales Training, unveraendert.
     model.train()
 
     total_loss = 0.0
@@ -45,13 +50,22 @@ def train_one_epoch(model, loader, criterion, optimizer, device):
 
         logits = model(X)
 
-        loss = criterion(logits, y)
+        task_loss = criterion(logits, y)
+
+        loss = task_loss
+        if proximal_mu > 0.0 and global_params is not None:
+            proximal = 0.0
+            for param, global_param in zip(model.parameters(), global_params):
+                proximal = proximal + ((param - global_param) ** 2).sum()
+            loss = task_loss + (proximal_mu / 2.0) * proximal
 
         loss.backward()
 
         optimizer.step()
 
-        total_loss += loss.item() * len(y)
+        # nur die Task-Loss (CE) berichten, damit train_loss ueber verschiedene mu
+        # vergleichbar bleibt und nicht vom Strafterm verzerrt wird
+        total_loss += task_loss.item() * len(y)
 
         correct += (logits.argmax(dim=1) == y).sum().item()
         total += len(y)
