@@ -79,7 +79,12 @@ def get_evaluate_fn(hidden_dim: int, dropout: float, run_logger: RunLogger, data
     return evaluate_global
 
 
-class SaveModelStrategy(fl.server.strategy.FedAvg):
+class SaveModelStrategy(fl.server.strategy.FedAvgM):
+    # FedAvgM (Hsu et al., 2019): server-seitiges Momentum auf der Aggregation.
+    # Mit server_momentum=0.0 reduziert sich das exakt auf FedAvg. Weil unsere
+    # aggregate_fit nur super().aggregate_fit() aufruft und danach speichert/loggt,
+    # kommt das Momentum "geschenkt" — die zurueckgegebenen Gewichte sind bereits
+    # momentum-korrigiert.
     def __init__(
         self,
         model_path: Path,
@@ -132,13 +137,14 @@ class SaveModelStrategy(fl.server.strategy.FedAvg):
         return aggregated_parameters, aggregated_metrics
 
 
-def get_fit_config_fn(local_epochs: int):
+def get_fit_config_fn(local_epochs: int, proximal_mu: float = 0.0):
     # clients call fit_config at each round, and then get the same local_epochs number that we specified
     # becuase in the get_fit_config_fn the fit_config function is init with the same local_epochs (independent of server_round), this will stay consistent
     # we do this because flower framework works with such a function
     # could implement something more complicated here: do less local epochs (so on each client) the higher the round etc.
+    # proximal_mu is the FedProx strength; broadcast so every client uses the same mu (0 = plain FedAvg)
     def fit_config(server_round: int):
-        return {"local_epochs": local_epochs}
+        return {"local_epochs": local_epochs, "proximal_mu": proximal_mu}
 
     return fit_config
 
@@ -224,6 +230,18 @@ def main():
         help="Dirichlet alpha recorded in the run config (label_skew only).",
     )
     parser.add_argument(
+        "--mu",
+        type=float,
+        default=env_float("MU", 0.0),
+        help="FedProx proximal term strength (0 = plain FedAvg).",
+    )
+    parser.add_argument(
+        "--beta",
+        type=float,
+        default=env_float("BETA", 0.0),
+        help="FedAvgM server momentum (0 = plain FedAvg).",
+    )
+    parser.add_argument(
         "--data-dir",
         type=str,
         default=env_str("FML_DATA_DIR", None),
@@ -256,6 +274,14 @@ def main():
     # min_fit_clients == 0 means "use all clients" (keeps the old all-clients default)
     min_fit_clients = args.min_fit_clients or args.num_clients
 
+    # label the run by which drift-mitigation is active (mu=client-side, beta=server-side)
+    active = []
+    if args.mu > 0.0:
+        active.append("fedprox")
+    if args.beta > 0.0:
+        active.append("fedavgm")
+    algorithm = "+".join(active) if active else "fedavg"
+
     # if a partition meta.json exists, pull its client sizes / class distribution into
     # the run config so the dashboard can plot the data layout for this run
     partition_meta = {}
@@ -283,6 +309,9 @@ def main():
             "alpha": args.alpha,
             "fraction_fit": args.fraction_fit,
             "min_fit_clients": min_fit_clients,
+            "mu": args.mu,
+            "beta": args.beta,
+            "algorithm": algorithm,
             "data_dir": args.data_dir,
             # data layout (from meta.json if available)
             "client_sizes": partition_meta.get("client_sizes"),
@@ -308,7 +337,8 @@ def main():
         min_available_clients=args.num_clients,     # wait until all clients connected, then sample
         min_evaluate_clients=0,
         initial_parameters=initial_parameters,
-        on_fit_config_fn=get_fit_config_fn(args.local_epochs),  # pass function that clients can call to know how much epochs to train at each round
+        server_momentum=args.beta,  # FedAvgM server momentum (0.0 = plain FedAvg)
+        on_fit_config_fn=get_fit_config_fn(args.local_epochs, args.mu),  # broadcasts local_epochs + FedProx mu to clients each round
         fit_metrics_aggregation_fn=weighted_average,    # how to weigh clients performances to aggregate
         evaluate_fn=get_evaluate_fn(args.hidden_dim, args.dropout, run_logger, args.data_dir),     # evalute fn for the server
     )
