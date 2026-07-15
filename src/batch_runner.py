@@ -52,6 +52,8 @@ def runner_command(config: dict[str, Any]) -> list[str]:
         "--partition-mode", str(config.get("partition_mode", "iid")),
         "--client-size-mode", str(config.get("client_size_mode", "balanced")),
         "--alpha", str(config.get("alpha", 0.5)),
+        "--mu", str(config.get("mu", 0.0)),
+        "--beta", str(config.get("beta", 0.0)),
         "--fraction-fit", str(config.get("fraction_fit", 1.0)),
         "--min-fit-clients", str(config.get("min_fit_clients", 0)),
         "--seed", str(config.get("seed", 42)),
