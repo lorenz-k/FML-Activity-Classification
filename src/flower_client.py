@@ -50,6 +50,13 @@ class HarFlowerClient(fl.client.NumPyClient):
     def fit(self, parameters, config):
         set_model_parameters(self.model, parameters)    # loads param arrays into the state dict
 
+        # FedProx: mu kommt pro Runde vom Server (Fit-Config). Ist mu > 0, merken
+        # wir das globale Modell w^t am Rundenstart als Anker fuer den Strafterm.
+        proximal_mu = float(config.get("proximal_mu", 0.0))
+        global_params = None
+        if proximal_mu > 0.0:
+            global_params = [p.detach().clone() for p in self.model.parameters()]
+
         round_epochs = int(config.get("local_epochs", self.epochs))
         train_loss = 0.0
         train_accuracy = 0.0
@@ -60,6 +67,8 @@ class HarFlowerClient(fl.client.NumPyClient):
                 self.criterion,
                 self.optimizer,
                 self.device,
+                global_params=global_params,
+                proximal_mu=proximal_mu,
             )
 
         num_examples = len(self.train_loader.dataset)
