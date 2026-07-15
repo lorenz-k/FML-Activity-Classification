@@ -512,19 +512,72 @@ def render_run_detail(run_dir: Path, config: dict[str, Any], metrics: pd.DataFra
                 st.code(launcher_log)
 
 
+def _fmt_num(value: Any) -> str:
+    # kompakte Zahl fuers Label: 1.0 -> "1", 0.30 -> "0.3", 0.01 -> "0.01"
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if number == int(number):
+        return str(int(number))
+    return f"{number:g}"
+
+
+def run_label(config: dict[str, Any]) -> str:
+    # kurzes, sprechendes Label fuer die Vergleichs-Charts (statt der langen run_id).
+    # Beispiel: "nonIID a0.3 imbal 50% - FedProx mu0.1"
+    partition = config.get("partition_mode", "iid")
+    if partition == "iid":
+        parts = ["IID"]
+    else:
+        parts = [f"nonIID a{_fmt_num(config.get('alpha'))}"]
+
+    if config.get("client_size_mode") == "imbalanced":
+        parts.append("imbal")
+    frac = config.get("fraction_fit")
+    if frac is not None and float(frac) < 1.0:
+        parts.append(f"{int(float(frac) * 100)}%")
+
+    mu = float(config.get("mu") or 0.0)
+    beta = float(config.get("beta") or 0.0)
+    algo_bits = []
+    if mu > 0:
+        algo_bits.append(f"FedProx mu{_fmt_num(mu)}")
+    if beta > 0:
+        algo_bits.append(f"FedAvgM b{_fmt_num(beta)}")
+    algo = " + ".join(algo_bits) if algo_bits else "FedAvg"
+
+    return f"{' '.join(parts)} - {algo}"
+
+
 def render_comparison(selected_runs: list[Path]) -> None:
     rows = []
+    labels: dict[str, str] = {}   # run_dir.name -> kurzes Label (fuer die Charts)
+    used: dict[str, int] = {}
     for run_dir in selected_runs:
         config, metrics = load_run(run_dir)
         final_eval = final_eval_row(metrics)
         status = load_status(run_dir)
+        # eindeutiges Label: bei gleichem Label (z.B. gleiche Settings) Zaehler anhaengen,
+        # damit die Chart-Serien nicht kollidieren
+        label = run_label(config)
+        if label in used:
+            used[label] += 1
+            label = f"{label} #{used[label]}"
+        else:
+            used[label] = 1
+        labels[run_dir.name] = label
         rows.append(
             {
+                "label": label,
                 "run_id": run_dir.name,
                 "status": status.get("state"),
+                "algorithm": config.get("algorithm", "fedavg"),
                 "partition_mode": config.get("partition_mode"),
                 "client_size_mode": config.get("client_size_mode"),
                 "alpha": config.get("alpha"),
+                "mu": config.get("mu"),
+                "beta": config.get("beta"),
                 "fraction_fit": config.get("fraction_fit"),
                 "min_fit_clients": config.get("min_fit_clients"),
                 "rounds": config.get("rounds"),
@@ -553,7 +606,7 @@ def render_comparison(selected_runs: list[Path]) -> None:
         evaluate = latest_round_events(metrics, "evaluate")
         if evaluate.empty:
             continue
-        evaluate["run_id"] = run_dir.name
+        evaluate["series"] = labels[run_dir.name]   # kurzes Label statt langer run_id
         combined.append(evaluate)
 
     if not combined:
@@ -562,13 +615,13 @@ def render_comparison(selected_runs: list[Path]) -> None:
     combined_df = pd.concat(combined, ignore_index=True)
     accuracy_chart = combined_df.pivot_table(
         index="round",
-        columns="run_id",
+        columns="series",
         values="accuracy",
         aggfunc="last",
     )
     f1_chart = combined_df.pivot_table(
         index="round",
-        columns="run_id",
+        columns="series",
         values="macro_f1",
         aggfunc="last",
     )
@@ -688,6 +741,8 @@ def render_batch_form() -> None:
                 "Participation Rates", options=[1.0, 0.5], default=[1.0],
             )
             alphas = st.text_input("Alphas (label skew)", value="0.3, 1.0")
+            mus = st.text_input("Mu (FedProx, 0=FedAvg)", value="0.0")
+            betas = st.text_input("Beta (FedAvgM, 0=FedAvg)", value="0.0")
             max_runs = st.number_input("Max Runs", min_value=1, max_value=200, value=24)
             submitted = st.form_submit_button("Start Batch")
 
@@ -707,6 +762,8 @@ def render_batch_form() -> None:
                 "hidden_dim": parse_int_values(hidden_dims, "Hidden Dims", 1, 2048),
                 "dropout": parse_float_values(dropouts, "Dropouts", 0.0, 0.8),
                 "alpha": parse_float_values(alphas, "Alphas", 0.01, 100.0),
+                "mu": parse_float_values(mus, "Mu", 0.0, 100.0),
+                "beta": parse_float_values(betas, "Beta", 0.0, 0.99),
             }
             combinations = []
             seen = set()
@@ -722,10 +779,12 @@ def render_batch_form() -> None:
                 client_size_modes,
                 participation_rates,
                 parsed["alpha"],
+                parsed["mu"],
+                parsed["beta"],
             ):
-                pmode, alpha = combo[7], combo[10]
+                pmode, alpha, mu, beta = combo[7], combo[10], combo[11], combo[12]
                 # alpha is meaningless for IID — collapse to one alpha to avoid dupes
-                key = combo[:10] + ((None,) if pmode == "iid" else (alpha,))
+                key = combo[:10] + ((None,) if pmode == "iid" else (alpha,)) + (mu, beta)
                 if key in seen:
                     continue
                 seen.add(key)
@@ -748,11 +807,16 @@ def render_batch_form() -> None:
 
         configs = []
         for index, combo in enumerate(combinations, start=1):
-            r, clients, epochs, lr, bs, hd, do, pmode, csize, frac, alpha = combo
+            r, clients, epochs, lr, bs, hd, do, pmode, csize, frac, alpha, mu, beta = combo
             part_tag = "iid" if pmode == "iid" else f"noniid_a{slug_value(alpha)}"
+            algo_tag = ""
+            if mu > 0:
+                algo_tag += f"_fedprox_mu{slug_value(mu)}"
+            if beta > 0:
+                algo_tag += f"_fedavgm_b{slug_value(beta)}"
             run_id = (
                 f"{clean_batch_id}_{index:02d}_{part_tag}_{csize}"
-                f"_part{int(frac * 100)}_lr{slug_value(lr)}_hd{slug_value(hd)}"
+                f"_part{int(frac * 100)}_lr{slug_value(lr)}_hd{slug_value(hd)}{algo_tag}"
             )
             configs.append(
                 {
@@ -767,6 +831,8 @@ def render_batch_form() -> None:
                     "partition_mode": pmode,
                     "client_size_mode": csize,
                     "alpha": float(alpha),
+                    "mu": float(mu),
+                    "beta": float(beta),
                     "fraction_fit": float(frac),
                     "min_fit_clients": min_fit_from_fraction(frac, int(clients)),
                 }
