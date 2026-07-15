@@ -125,6 +125,78 @@ outputs/runs/local_demo/federated_global.pt
 Each line is one JSON event, for example centralized evaluation metrics for one
 federated round.
 
+## Android Client (Termux)
+
+A phone on the same local network as the server can join a run as a real
+Flower client via Termux + proot-distro (a userspace Ubuntu, no root needed).
+
+1. Install [Termux](https://f-droid.org/packages/com.termux/) from F-Droid
+   (the Play Store build is outdated and unmaintained), open it, and install
+   `proot-distro`:
+
+   ```bash
+   pkg update && pkg upgrade -y
+   pkg install -y proot-distro git
+   ```
+
+2. Install and enter an Ubuntu rootfs. Everything below runs inside this
+   Ubuntu shell (`proot-distro login ubuntu` re-enters it later):
+
+   ```bash
+   proot-distro install ubuntu
+   proot-distro login ubuntu
+   ```
+
+3. Inside Ubuntu, install Python and clone the repo:
+
+   ```bash
+   apt update && apt install -y python3 python3-pip python3-venv git
+   git clone <repo-url>
+   cd FML-Activity-Classification
+   ```
+
+4. Set up a venv and install just what the client needs (`uv` isn't required
+   on the phone, plain `pip` with the client's two dependencies is enough):
+
+   ```bash
+   python3 -m venv .venv
+   source .venv/bin/activate
+   pip install --upgrade pip
+   pip install torch --index-url https://download.pytorch.org/whl/cpu
+   pip install -r requirements-training.txt
+   ```
+
+   Most phones are `aarch64`; if the CPU wheel index above has no build for
+   your device, drop `--index-url` and let pip resolve the default `torch`
+   wheel instead.
+
+5. Get the client shard the phone should train on, either copied from a
+   machine that already has it (e.g. `scp client_0.npz <phone-ip>:...` over
+   the LAN, Termux runs an SSH server via `pkg install openssh`), or generated
+   locally:
+
+   ```bash
+   python3 -m src.data_preperation --n_clients 4 --seed 42
+   ```
+
+6. On the machine that will run the server, bind it to all interfaces (not
+   just `127.0.0.1`) and note that machine's LAN IP:
+
+   ```bash
+   uv run python -m src.flower_server --rounds 5 --num-clients 4 \
+     --run-id android_demo --server-address 0.0.0.0:8080
+   ip addr show      # look for the LAN IP, e.g. 192.168.1.42
+   ```
+
+7. Back in Termux/Ubuntu on the phone, start the client against that address:
+
+   ```bash
+   python3 -m src.flower_client --client-id 0 --server-address 192.168.1.42:8080
+   ```
+
+Phone and server must be on the same Wi-Fi/LAN, and the server machine's
+firewall has to allow inbound connections on port 8080.
+
 ## Docker Compose Simulation
 
 Build and run the deployment-like local setup with one server and four clients:
