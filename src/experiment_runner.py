@@ -115,6 +115,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--partition-mode", choices=["iid", "label_skew"], default="iid")
     parser.add_argument("--client-size-mode", choices=["balanced", "imbalanced"], default="balanced")
     parser.add_argument("--alpha", type=float, default=0.5)
+    parser.add_argument("--mu", type=float, default=0.0)  # FedProx strength (0 = FedAvg)
+    parser.add_argument("--beta", type=float, default=0.0)  # FedAvgM momentum (0 = FedAvg)
     parser.add_argument("--fraction-fit", type=float, default=1.0)
     parser.add_argument("--min-fit-clients", type=int, default=0)
     parser.add_argument("--seed", type=int, default=42)
@@ -196,6 +198,10 @@ def main() -> int:
         args.client_size_mode,
         "--alpha",
         str(args.alpha),
+        "--mu",
+        str(args.mu),
+        "--beta",
+        str(args.beta),
         "--data-dir",
         str(data_dir),
         "--run-id",
