@@ -10,6 +10,10 @@ __pycache__/
 # we dont want the different models that everyone has trained locally, to flood the repo for everyone
 outputs/
 
+# The UCI HAR dataset is downloaded on demand by src/data_preperation.py,
+# so the raw files do not belong in the repository (see README, "Dataset and Citation")
+cache/
+
 # We dont want these files from macos finder which store folder displaying preferences:
 .DS_Store
 **/ .DS_Store

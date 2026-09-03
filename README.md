@@ -2,6 +2,28 @@
 Federated Machine Learning application for Human Activity Recognition (UCI HAR). Developed as part of the FML Programmierpraktikum at TU Berlin (SBE Group).
 Topic B
 
+## Dataset and Citation
+
+The experiments use the **Human Activity Recognition Using Smartphones** dataset
+(UCI HAR, version 1.0): 30 volunteers performing six activities while wearing a
+waist-mounted smartphone, recorded at 50 Hz from its accelerometer and gyroscope.
+
+`src/data_preperation.py` downloads the archive on demand into `cache/`, which is
+git-ignored — the raw data is not part of this repository. Source:
+<https://archive.ics.uci.edu/dataset/240/human+activity+recognition+using+smartphones>
+
+The dataset license requires that any publication using it acknowledges the
+original work:
+
+> Davide Anguita, Alessandro Ghio, Luca Oneto, Xavier Parra and Jorge L.
+> Reyes-Ortiz. *A Public Domain Dataset for Human Activity Recognition Using
+> Smartphones.* 21st European Symposium on Artificial Neural Networks,
+> Computational Intelligence and Machine Learning (ESANN 2013), Bruges, Belgium,
+> 24–26 April 2013.
+
+The dataset is distributed AS-IS, its authors accept no responsibility for its
+use or misuse, and any commercial use is prohibited.
+
 ## Code overview
 
 The pipeline is file-based: each step writes artifacts into `outputs/` that the
